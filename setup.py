@@ -23,12 +23,14 @@ with open("llmlingua/version.py", "r") as version_file:
     exec(version_file.read(), VERSION)
 
 INSTALL_REQUIRES = [
-    "transformers>=4.26.0",
-    "accelerate",
-    "torch",
-    "tiktoken",
+    "transformers>=4.40.0",  # Support Mistral 3
+    "accelerate>=0.27.0",
+    "torch>=2.1.0",
+    "sentencepiece",  # Tokenizer Mistral
+    "protobuf",
     "nltk",
     "numpy",
+    "tiktoken",  # Gardé pour compatibilité OpenAI
 ]
 QUANLITY_REQUIRES = [
     "black==21.4b0",

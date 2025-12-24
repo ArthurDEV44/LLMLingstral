@@ -4,5 +4,6 @@
 # flake8: noqa
 from .prompt_compressor import PromptCompressor
 from .version import VERSION as __version__
+from .mistral_config import MISTRAL_MODELS, DEFAULT_MODEL
 
-__all__ = ["PromptCompressor"]
+__all__ = ["PromptCompressor", "MISTRAL_MODELS", "DEFAULT_MODEL"]
