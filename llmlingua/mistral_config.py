@@ -12,14 +12,13 @@ MISTRAL_MODELS = {
     "embedding": "intfloat/e5-mistral-7b-instruct",
 }
 
-# Modèles LLMLingua-2 Mistral (noms de destination après entraînement)
-MISTRAL_LINGUA2_MODELS = {
-    "large": "mistralai/mistral-lingua-2-7b-meetingbank",   # À entraîner
-    "small": "mistralai/mistral-lingua-2-3b-meetingbank",   # À entraîner
-}
+# Note: LLMLingua-2 utilise toujours le modèle Microsoft XLM-RoBERTa car
+# aucun modèle Mistral équivalent pour token classification n'existe.
+# Voir: microsoft/llmlingua-2-xlm-roberta-large-meetingbank
+LLMLINGUA2_MODEL = "microsoft/llmlingua-2-xlm-roberta-large-meetingbank"
 
-# Modèle de base pour l'entraînement token classification
-TRAINING_BASE_MODEL = "mistralai/Ministral-3-3B-Instruct-2512"
+# Modèle léger pour tests CI (architecture Mistral, ~1M params)
+TEST_MODEL = "openaccess-ai-collective/tiny-mistral"
 
 # Alias pour migration progressive
 DEFAULT_MODEL = MISTRAL_MODELS["default"]

@@ -21,6 +21,7 @@ from transformers import (
     AutoModelForTokenClassification,
     AutoTokenizer,
 )
+from transformers.cache_utils import DynamicCache
 
 from .utils import (
     TokenClfDataset,
@@ -180,9 +181,17 @@ class PromptCompressor:
             input_ids = tokenized_text["input_ids"].to(self.device)
             attention_mask = tokenized_text["attention_mask"].to(self.device)
         if past_key_values is not None:
-            past_length = past_key_values[0][0].shape[2]
+            # Handle both list format (legacy) and DynamicCache format (transformers 4.50+)
+            if isinstance(past_key_values, list):
+                past_length = past_key_values[0][0].shape[2]
+                # Convert list to DynamicCache for newer transformers
+                past_key_values_for_model = DynamicCache.from_legacy_cache(past_key_values)
+            else:
+                past_length = past_key_values.get_seq_length()
+                past_key_values_for_model = past_key_values
         else:
             past_length = 0
+            past_key_values_for_model = None
         if end is None:
             end = input_ids.shape[1]
         end = min(end, past_length + self.max_position_embeddings)
@@ -190,10 +199,15 @@ class PromptCompressor:
             response = self.model(
                 input_ids[:, past_length:end],
                 attention_mask=attention_mask[:, :end],
-                past_key_values=past_key_values,
+                past_key_values=past_key_values_for_model,
                 use_cache=True,
             )
-            past_key_values = response.past_key_values
+            # Convert DynamicCache back to list format for compatibility with rest of code
+            new_past_key_values = response.past_key_values
+            if isinstance(new_past_key_values, DynamicCache):
+                past_key_values = new_past_key_values.to_legacy_cache()
+            else:
+                past_key_values = new_past_key_values
 
         shift_logits = response.logits[..., :-1, :].contiguous()
         shift_labels = input_ids[..., past_length + 1 : end].contiguous()
