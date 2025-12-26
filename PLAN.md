@@ -261,25 +261,35 @@ class ModelManager:
 
 ---
 
-### Phase 3 : Extraction du module `filters/` (Priorité: MOYENNE)
+### Phase 3 : Extraction du module `filters/` (Priorité: MOYENNE) ✅ COMPLÉTÉ
 
 **Objectif** : Séparer les 3 niveaux de filtrage en classes distinctes.
 
-**Fichiers à créer** :
-- [ ] `llmlangstral/filters/__init__.py`
-- [ ] `llmlangstral/filters/base.py`
-- [ ] `llmlangstral/filters/context_filter.py`
-- [ ] `llmlangstral/filters/sentence_filter.py`
-- [ ] `llmlangstral/filters/token_filter.py`
+**Fichiers créés** :
+- [x] `llmlangstral/filters/__init__.py`
+- [x] `llmlangstral/filters/base.py` (FilterBase, FilterContext)
+- [x] `llmlangstral/filters/context.py` (ContextLevelFilter)
+- [x] `llmlangstral/filters/sentence.py` (SentenceLevelFilter)
+- [x] `llmlangstral/filters/token.py` (TokenLevelFilter + helpers)
 
-**Méthodes à extraire de `prompt_compressor.py`** :
-- `control_context_budget()` → `ContextLevelFilter`
-- `control_sentence_budget()` → `SentenceLevelFilter`
-- `iterative_compress_prompt()` → `TokenLevelFilter`
-- `get_compressed_input()` → `TokenLevelFilter`
+**Méthodes extraites de `prompt_compressor.py`** :
+- [x] `control_context_budget()` → `ContextLevelFilter`
+- [x] `control_sentence_budget()` → `SentenceLevelFilter`
+- [x] `iterative_compress_prompt()` → `TokenLevelFilter`
+- [x] `get_compressed_input()` → `TokenLevelFilter`
+- [x] `get_dynamic_compression_ratio()` → `TokenLevelFilter`
+- [x] `get_structured_dynamic_compression_ratio()` → `TokenLevelFilter`
+- [x] `token_segment()` → `TokenLevelFilter`
+- [x] `get_estimate_threshold_base_distribution()` → `TokenLevelFilter`
 
-**Effort estimé** : 2-3 jours
-**Risque** : Moyen (logique complexe, beaucoup d'interdépendances)
+**Résultats** :
+- 5 fichiers créés dans `llmlangstral/filters/`
+- `prompt_compressor.py` délègue aux filtres via callbacks
+- Architecture injection de dépendances (FilterContext)
+- Syntaxe validée (py_compile OK)
+
+**Effort réel** : 1 jour
+**Risque** : Moyen (géré via callbacks pour éviter imports circulaires)
 
 ---
 
@@ -439,7 +449,7 @@ __all__ = [
 |-------|-------------|--------|--------|----------|--------|
 | 1 | Module `ranking/` | 1j | Faible | HAUTE | ✅ FAIT |
 | 2 | Module `core/` | 1j | Faible | HAUTE | ✅ FAIT |
-| 3 | Module `filters/` | 2-3j | Moyen | MOYENNE | ⏳ |
+| 3 | Module `filters/` | 1j | Moyen | MOYENNE | ✅ FAIT |
 | 4 | Module `compression/` | 3-4j | Élevé | MOYENNE | ⏳ |
 | 5 | Modules `budget/` + `recovery/` | 1-2j | Faible | BASSE | ⏳ |
 | 6 | Façade backward-compatible | 1j | Faible | CRITIQUE | ⏳ |

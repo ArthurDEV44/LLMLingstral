@@ -18,6 +18,12 @@ from torch.utils.data import DataLoader
 from transformers.cache_utils import DynamicCache
 
 from .core import ModelManager
+from .filters import (
+    FilterContext,
+    ContextLevelFilter,
+    SentenceLevelFilter,
+    TokenLevelFilter,
+)
 from .mistral_config import DEFAULT_MODEL, EMBEDDING_MODEL
 from .ranking import RankingRegistry
 from .utils import (
@@ -88,9 +94,26 @@ class PromptCompressor:
         # Use ModelManager for centralized model loading
         self._model_manager = ModelManager(model_name, device_map, model_config)
         self.context_idxs = []
+        self._filter_ctx = None  # Lazy initialized
 
         if use_llmlingua2 or use_slingua:  # slingua use llmlingua2 backend
             self._model_manager.init_llmlingua2(**llmlingua2_config)
+
+    # Filter context for delegation
+    @property
+    def _filters(self) -> FilterContext:
+        """Lazy-initialize filter context with callbacks."""
+        if self._filter_ctx is None:
+            self._filter_ctx = FilterContext(
+                tokenizer=self.tokenizer,
+                device=self.device,
+                max_position_embeddings=self.max_position_embeddings,
+                cache_bos_num=self.cache_bos_num,
+                get_ppl_fn=self.get_ppl,
+                get_condition_ppl_fn=self.get_condition_ppl,
+                get_rank_results_fn=self.get_rank_results,
+            )
+        return self._filter_ctx
 
     # Delegation properties for backward compatibility
     @property
@@ -1009,157 +1032,119 @@ class PromptCompressor:
                 condition_pos_id=self.get_token_length(text) - 1,
             )
 
-    def get_dynamic_compression_ratio(
-        self,
-        context: list,
-        target_token: float,
-        iterative_size: int,
-        dynamic_ratio: list,
-        start: int,
-        seg_info: List[List[tuple]] = None,
-    ):
-        def get_ratio(base: float, delta: float):
-            return max(min(1, base + delta), 0)
-
-        context_length = [self.get_token_length(ii, False) + 2 for ii in context]
-        if start:
-            context_length = context_length[1:]
-        tau = target_token / (sum(context_length) + 1)
-        res, idx, last, last_target = [], 0, 1, []
-        while idx < len(context_length):
-            if last + context_length[idx] >= iterative_size:
-                last_target.append(
-                    (iterative_size - last, get_ratio(tau, dynamic_ratio[idx]))
-                )
-                res.append(last_target)
-                last = last + context_length[idx] - iterative_size
-                if last > iterative_size:
-                    k = last // iterative_size
-                    res.extend(
-                        [[(iterative_size, get_ratio(tau, dynamic_ratio[idx]))]] * k
-                    )
-                    last -= k * iterative_size
-
-                last_target = (
-                    [(last, get_ratio(tau, dynamic_ratio[idx]))] if last else []
-                )
-            else:
-                last += context_length[idx]
-                last_target.append(
-                    (context_length[idx], get_ratio(tau, dynamic_ratio[idx]))
-                )
-            idx += 1
-        if last_target:
-            res.append(last_target)
-        return res
-
-    def get_structured_dynamic_compression_ratio(
-        self,
-        context: list,
-        iterative_size: int,
-        dynamic_ratio: list,
-        start: int,
-        seg_info: List[List[tuple]] = None,
-    ):
-        if start:
-            pure_context = context[1:]
-        else:
-            pure_context = context
-        global_dynamic_rate, global_dynamic_compress, segments = [], [], []
-        for context_idx, text in enumerate(pure_context):
-            text_seen = 0
-            for seg_idx, (seg_len, seg_rate, seg_compress) in enumerate(
-                seg_info[context_idx]
-            ):
-                seg_text = text[text_seen : text_seen + seg_len]
-                if (
-                    seg_idx == len(seg_info[context_idx]) - 1
-                    and context_idx != len(pure_context) - 1
-                ):
-                    seg_text += "\n\n"
-                segments.append(seg_text)
-                if seg_compress:
-                    global_dynamic_rate.append(seg_rate)
-                else:
-                    global_dynamic_rate.append(1.0)
-                global_dynamic_compress.append(seg_compress)
-                text_seen += seg_len
-        origin_text = "\n\n".join(pure_context)
-        assert len("".join(segments)) == len(origin_text)
-        assert len(segments) == len(global_dynamic_rate) == len(global_dynamic_compress)
-
-        text_input_ids = self.tokenizer(
-            "\n\n".join(context), add_special_tokens=False
-        ).input_ids[start:]
-        assert self.tokenizer.decode(text_input_ids) == origin_text
-        dynamic_compression_ratio = self.token_segment(
-            text_input_ids,
-            iterative_size,
-            segments,
-            global_dynamic_rate,
-            global_dynamic_compress,
-        )
-        return dynamic_compression_ratio
-
-    def token_segment(
-        self,
-        text_input_ids: List[int],
-        iterative_size: int,
-        segments: List[str],
-        global_dynamic_rate: List[float],
-        global_dynamic_compress: List[bool],
-    ):
-        decode_window = 3
-        seg_idx, seg_seen, token_seen_num, last_rate = 0, 0, 0, -1
-        dynamic_compression_rate, local_compresssion_rate = [], []
-        for i in range(len(text_input_ids)):
-            if i < decode_window:
-                id_pre, id_cur = text_input_ids[:i], text_input_ids[: i + 1]
-            else:
-                id_pre, id_cur = (
-                    text_input_ids[i - decode_window + 1 : i],
-                    text_input_ids[i - decode_window + 1 : i + 1],
-                )
-            cur_word = self.tokenizer.decode(id_cur)[
-                len(self.tokenizer.decode(id_pre)) :
-            ]
-            cur_word_len = len(cur_word)
-            if cur_word_len and cur_word_len >= len(segments[seg_idx]) - seg_seen:
-                possible_rate, possible_compress = [], []
-                while (
-                    cur_word_len and cur_word_len >= len(segments[seg_idx]) - seg_seen
-                ):
-                    possible_rate.append(global_dynamic_rate[seg_idx])
-                    possible_compress.append(global_dynamic_compress[seg_idx])
-                    cur_word_len -= len(segments[seg_idx]) - seg_seen
-                    seg_idx += 1
-                    seg_seen = 0
-                if cur_word_len:
-                    possible_rate.append(global_dynamic_rate[seg_idx])
-                    possible_compress.append(global_dynamic_compress[seg_idx])
-                new_rate = 1.0 if False in possible_compress else min(possible_rate)
-            else:
-                new_rate = global_dynamic_rate[seg_idx]
-            if new_rate != last_rate and i - token_seen_num:
-                local_compresssion_rate.append((i - token_seen_num, last_rate))
-                token_seen_num = i
-            last_rate = new_rate
-            seg_seen += cur_word_len
-            if (i + 1) % iterative_size == 0:
-                if token_seen_num != i + 1:
-                    local_compresssion_rate.append((i + 1 - token_seen_num, last_rate))
-                    token_seen_num = i + 1
-                dynamic_compression_rate.append(local_compresssion_rate[:])
-                local_compresssion_rate = []
-        if token_seen_num != len(text_input_ids):
-            local_compresssion_rate.append(
-                (len(text_input_ids) - token_seen_num, last_rate)
-            )
-        if local_compresssion_rate != []:
-            dynamic_compression_rate.append(local_compresssion_rate[:])
-        return dynamic_compression_rate
+    # =========================================================================
+    # Filtering methods - delegated to filters/ module
+    # =========================================================================
 
     def control_context_budget(
+        self,
+        context: List[str],
+        context_tokens_length: List[int],
+        target_token: float,
+        force_context_ids: List[int] = None,
+        force_context_number: int = None,
+        question: str = "",
+        condition_in_question: str = "none",
+        reorder_context: str = "original",
+        dynamic_context_compression_ratio: float = 0.0,
+        rank_method: str = "longllmlingua",
+        context_budget: str = "+100",
+        context_segs: List[List[str]] = None,
+        context_segs_rate: List[List[float]] = None,
+        context_segs_compress: List[List[bool]] = None,
+        strict_preserve_uncompressed: bool = True,
+    ):
+        """Delegate to ContextLevelFilter."""
+        filter_obj = ContextLevelFilter(self._filters)
+        res, dynamic_ratio, used, context_idxs_new = filter_obj.filter(
+            context=context,
+            context_tokens_length=context_tokens_length,
+            target_token=target_token,
+            force_context_ids=force_context_ids,
+            force_context_number=force_context_number,
+            question=question,
+            condition_in_question=condition_in_question,
+            reorder_context=reorder_context,
+            dynamic_context_compression_ratio=dynamic_context_compression_ratio,
+            rank_method=rank_method,
+            context_budget=context_budget,
+            context_segs=context_segs,
+            context_segs_rate=context_segs_rate,
+            context_segs_compress=context_segs_compress,
+            strict_preserve_uncompressed=strict_preserve_uncompressed,
+        )
+        self.context_idxs.append(context_idxs_new)
+        return res, dynamic_ratio, used
+
+    def control_sentence_budget(
+        self,
+        context: List[str],
+        target_token: float,
+        keep_first_sentence: int = 0,
+        keep_last_sentence: int = 0,
+        keep_sentence_number: int = 0,
+        high_priority_bonus: int = 100,
+        token_budget_ratio: float = 1.4,
+        question: str = "",
+        condition_in_question: str = "none",
+        rank_method: str = "longllmlingua",
+        context_segs: List[List[str]] = None,
+        context_segs_rate: List[List[float]] = None,
+        context_segs_compress: List[List[bool]] = None,
+    ):
+        """Delegate to SentenceLevelFilter."""
+        filter_obj = SentenceLevelFilter(self._filters)
+        return filter_obj.filter(
+            context=context,
+            target_token=target_token,
+            keep_first_sentence=keep_first_sentence,
+            keep_last_sentence=keep_last_sentence,
+            keep_sentence_number=keep_sentence_number,
+            high_priority_bonus=high_priority_bonus,
+            token_budget_ratio=token_budget_ratio,
+            question=question,
+            condition_in_question=condition_in_question,
+            rank_method=rank_method,
+            context_segs=context_segs,
+            context_segs_rate=context_segs_rate,
+            context_segs_compress=context_segs_compress,
+        )
+
+    def iterative_compress_prompt(
+        self,
+        context: List[str],
+        target_token: float,
+        iterative_size: int = 200,
+        keep_split: bool = False,
+        split_token_id: int = 13,
+        start: int = 0,
+        dynamic_ratio: list = None,
+        condition_compare: bool = False,
+        segments_info: List[List[tuple]] = None,
+    ):
+        """Delegate to TokenLevelFilter."""
+        filter_obj = TokenLevelFilter(self._filters)
+        return filter_obj.filter(
+            context=context,
+            target_token=target_token,
+            iterative_size=iterative_size,
+            keep_split=keep_split,
+            split_token_id=split_token_id,
+            start=start,
+            dynamic_ratio=dynamic_ratio,
+            condition_compare=condition_compare,
+            segments_info=segments_info,
+        )
+
+    # Note: The following methods are now implemented in filters/token.py:
+    # - get_dynamic_compression_ratio
+    # - get_structured_dynamic_compression_ratio
+    # - token_segment
+    # - get_compressed_input
+    # - get_estimate_threshold_base_distribution
+    # The main iterative_compress_prompt method delegates to TokenLevelFilter.
+
+    def _deprecated_control_context_budget(
         self,
         context: List[str],
         context_tokens_length: List[int],
